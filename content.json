@@ -1,0 +1,91 @@
+(function () {
+  "use strict";
+
+  // Matches https://www.youtube.com/shorts/VIDEO_ID (with optional trailing path/query)
+  const SHORTS_RE = /^(https?:\/\/(?:www\.|m\.)?youtube\.com)\/shorts\/([a-zA-Z0-9_-]{6,})(\S*)$/i;
+
+  function shortsToWatch(href) {
+    const match = href.match(SHORTS_RE);
+    if (!match) return null;
+    const [, origin, videoId, rest] = match;
+    const query = rest.startsWith("?")
+      ? rest.slice(1)
+      : rest.includes("?")
+        ? rest.slice(rest.indexOf("?") + 1)
+        : "";
+    return `${origin}/watch?v=${videoId}${query ? "&" + query : ""}`;
+  }
+
+  function rewriteAnchor(a) {
+    if (!a || !a.href) return;
+    const newHref = shortsToWatch(a.href);
+    if (newHref && a.href !== newHref) {
+      a.href = newHref;
+    }
+  }
+
+  function rewriteWithin(root) {
+    if (!root || typeof root.querySelectorAll !== "function") return;
+    root.querySelectorAll('a[href*="/shorts/"]').forEach(rewriteAnchor);
+  }
+
+  // Recurse into shadow roots, since YouTube's custom elements often hide
+  // thumbnail links inside one.
+  function sweepShadowRoots(node) {
+    const walker = document.createTreeWalker(node, NodeFilter.SHOW_ELEMENT);
+    let current;
+    while ((current = walker.nextNode())) {
+      if (current.shadowRoot) {
+        rewriteWithin(current.shadowRoot);
+        sweepShadowRoots(current.shadowRoot);
+      }
+    }
+  }
+
+  function fullSweep() {
+    rewriteWithin(document);
+    if (document.body) sweepShadowRoots(document.body);
+  }
+
+  // Initial pass once the DOM exists.
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", fullSweep, { once: true });
+  } else {
+    fullSweep();
+  }
+
+  // Catch everything YouTube injects afterwards (scrolling, search, related videos...).
+  const observer = new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      if (m.type === "attributes" && m.target.tagName === "A") {
+        rewriteAnchor(m.target);
+      }
+      m.addedNodes.forEach((node) => {
+        if (node.nodeType !== Node.ELEMENT_NODE) return;
+        if (node.tagName === "A") rewriteAnchor(node);
+        rewriteWithin(node);
+        if (node.shadowRoot) {
+          rewriteWithin(node.shadowRoot);
+          sweepShadowRoots(node.shadowRoot);
+        }
+      });
+    }
+  });
+
+  const startObserving = () => {
+    observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["href"],
+    });
+  };
+  if (document.documentElement) startObserving();
+  else document.addEventListener("DOMContentLoaded", startObserving, { once: true });
+
+  // YouTube fires this custom event every time its internal router finishes
+  // navigating to a new "page" (it's a single-page app, so most navigation
+  // never triggers a normal page load).
+  document.addEventListener("yt-navigate-finish", fullSweep);
+  window.addEventListener("popstate", fullSweep);
+})();
